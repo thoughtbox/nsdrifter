@@ -1,0 +1,43 @@
+# Findings suppressed by default. Each non-comment line is an extended
+# regular expression (bash =~) matched against the full finding text,
+# e.g. "[WARNING] HIDDEN DIRECTORY: /flash/.snap mode=775 uid=0 gid=5".
+# Suppressed findings are only counted in the summary.
+#
+# Site- or host-specific entries belong in $STATE_ROOT/allowlist (all hosts)
+# or $STATE_ROOT/<host>/allowlist (one host), not here. Keep entries narrow:
+# anchor the level and finding type and end paths with a space.
+#
+# Stock items observed on a NetScaler 14.1 VPX:
+
+# UFS snapshot directories.
+^\[WARNING\] HIDDEN DIRECTORY: /(flash|var)/\.snap mode=
+# NetScaler keeps per-user SSH keys in /var/pubkey/<user>/.ssh.
+^\[WARNING\] HIDDEN DIRECTORY: /var/pubkey/[^/ ]+/\.ssh mode=
+^\[WARNING\] FILE IN HIDDEN DIRECTORY: /var/pubkey/[^/ ]+/\.ssh/authorized_keys size=
+# FlexLM license daemon lock directory.
+^\[WARNING\] HIDDEN DIRECTORY: /tmp/\.flexlm mode=
+# Boot loaders and the firmware image on /flash.
+^\[WARNING\] (EXECUTABLE|SCRIPT OR BINARY) IN CONFIG/FLASH AREA: /flash/boot/[^ ]+ size=
+^\[WARNING\] EXECUTABLE IN CONFIG/FLASH AREA: /flash/ns-[0-9.]+-[0-9.]+\.gz size=
+# Certificates stored with execute bits, and the firmware signature.
+^\[WARNING\] EXECUTABLE IN CONFIG/FLASH AREA: /flash/nsconfig/(license/)?ssl/[^ /]+\.(cert|crt) size=
+^\[WARNING\] SCRIPT OR BINARY IN CONFIG/FLASH AREA: /flash/secboot/ns-[0-9.]+-[0-9.]+\.gz\.sha512\.signed\.bin size=
+# Stock .htaccess protecting the admin GUI's PHP system directory.
+^\[HIGH\] HIDDEN ENTRY IN WEB ROOT: /var/netscaler/gui/admin_ui/php/system/\.htaccess type=
+# EULA handler shipped in the logon portal themes.
+^\[WARNING\] SERVER-SIDE SCRIPT IN LOGON PORTAL: /var/netscaler/logon/themes/EULA/eula_upgrade\.pl size=
+# This tool's collector when installed (COLLECT_MODE=installed); changes to
+# it are still reported by check as drift.
+^\[WARNING\] SCRIPT OR BINARY IN CONFIG/FLASH AREA: /flash/nsconfig/scripts/ns-inventory\.sh size=
+# Files rewritten continuously: monit's state, and the nsroot CLI history
+# (every SSH session, including this tool's, appends to it; CLI commands are
+# checked through the ns.log audit trail instead).
+^\[WARNING\] MODIFIED FILE: /var/\.monit\.state \|
+^\[WARNING\] MODIFIED FILE: /var/nstmp/[^/ ]+/\.nscli_history \|
+# ADM auto-registration state, rewritten periodically.
+^\[WARNING\] MODIFIED FILE: /flash/nsconfig/admautoreg\.state \|
+# macOS metadata file shipped in the online help.
+^\[HIGH\] HIDDEN ENTRY IN WEB ROOT: /var/netscaler/help/help/\.DS_Store type=
+# Stock setgid files (also in NCSC-NL's known_guid_binaries list for
+# CVE-2025-6543 disk-image checks).
+^\[HIGH\] SETUID/SETGID FILE IN UNEXPECTED LOCATION: /var/(run/nsprofmgmt\.pid|run/nsmap\.pid|configd_devno) mode=
