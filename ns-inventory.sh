@@ -22,6 +22,11 @@ export PATH
 # fast-changing trees; /var/python/bin is kept, its library tree is not.
 SCAN_ROOTS=${SCAN_ROOTS:-"/nsconfig /flash /bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin /lib /usr/lib /usr/local/lib /etc /root /netscaler /var /tmp"}
 EXCLUDE_RE=${EXCLUDE_RE:-'^/var/(log|nslog|core|nstrace|run|cache|db|pgsql|nsproflog|nssynclog|crash|python/(lib|include)|mastools/logs)(/|$)'}
+# Trees left out of the file inventory above (keep in step with EXCLUDE_RE)
+# are swept by name only for hidden files and executables; the Python
+# library tree only for hidden files, as its modules are executable.
+SWEEP_ROOTS=${SWEEP_ROOTS:-"/var/log /var/nslog /var/core /var/nstrace /var/run /var/cache /var/db /var/pgsql /var/nsproflog /var/nssynclog /var/crash /var/mastools/logs"}
+SWEEP_HIDDEN_ONLY_ROOTS=${SWEEP_HIDDEN_ONLY_ROOTS:-"/var/python/lib /var/python/include"}
 MAX_HASH_SIZE=${MAX_HASH_SIZE:-104857600}
 SUID_ROOTS=${SUID_ROOTS:-/}
 # Trees whose file contents (up to 2 MiB, minus EXCLUDE_RE) are searched for
@@ -52,6 +57,7 @@ BOOT=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\),.*/\1/
 #            PCAP path size mtime for packet captures (pcap/pcapng magic), and
 #            POSTBOOT path type ctime mtime mode for root-fs files (not
 #            directories, not /tmp) whose inode changed after boot
+#   SWEEP    SWEEP path hidden|executable size mtime mode hash
 #   SCRIPT   SCRIPT path size mtime mode hash
 #   SUID     SUID path mode uid gid hash
 #   PERSIST  PERSISTENCE path mtime-iso hash
@@ -95,6 +101,10 @@ while (my $p = <STDIN>) {
         print join("\t", "POSTBOOT", $p, $t, $s[10], $s[9], $perm), "\n"
             if $boot && $s[0] == $rootdev && $s[10] > $boot + $grace
                && $fmt != 0040000 && $p !~ m{^/tmp(/|$)};
+    } elsif ($mode eq "SWEEP") {
+        next unless $fmt == 0100000;
+        my $why = ($p =~ m{/\.[^/]*$}) ? "hidden" : "executable";
+        print join("\t", "SWEEP", $p, $why, $s[7], $s[9], $perm, digest($p, $s[7])), "\n";
     } elsif ($mode eq "SCRIPT") {
         print join("\t", "SCRIPT", $p, $s[7], $s[9], $perm, digest($p, $s[7])), "\n";
     } elsif ($mode eq "SUID") {
@@ -154,6 +164,18 @@ inventory_files() {
     done | grep -Ev "$EXCLUDE_RE" | file_meta FILE
 }
 
+# Hidden files and executables in the trees excluded from the inventory.
+inventory_sweep() {
+    for root in $SWEEP_ROOTS; do
+        [ -d "$root" ] || continue
+        find -x "$root" -type f \( -name '.*' -o -perm -0100 -o -perm -0010 -o -perm -0001 \) -print 2>/dev/null
+    done | file_meta SWEEP
+    for root in $SWEEP_HIDDEN_ONLY_ROOTS; do
+        [ -d "$root" ] || continue
+        find -x "$root" -type f -name '.*' -print 2>/dev/null
+    done | file_meta SWEEP
+}
+
 # Setuid/setgid files anywhere on local filesystems, not only under SCAN_ROOTS.
 inventory_suid() {
     for root in $SUID_ROOTS; do
@@ -181,20 +203,22 @@ inventory_persistence() {
 }
 
 # Persistence-relevant configuration lines, one CONF record per line, so the
-# runner can report added lines exactly. Cron tables, startup scripts and SSH
-# keys are emitted whole (minus comments); httpd and ns.conf are filtered to
-# the directives that matter. ns.conf password hashes are redacted.
+# runner can report added lines exactly. Cron tables, startup scripts, SSH
+# keys and libmap (dynamic-linker substitution) files are emitted whole
+# (minus comments); httpd and ns.conf are filtered to the directives that
+# matter. ns.conf password hashes are redacted.
 inventory_conf() {
     for f in /etc/crontab /nsconfig/crontab /var/cron/tabs/* /nsconfig/rc.netscaler \
              /nsconfig/nsbefore.sh /nsconfig/nsafter.sh /etc/rc.conf /etc/rc.local \
-             /nsconfig/ssh/authorized_keys /root/.ssh/authorized_keys /var/pubkey/*/.ssh/authorized_keys*; do
+             /nsconfig/ssh/authorized_keys /root/.ssh/authorized_keys /var/pubkey/*/.ssh/authorized_keys* \
+             /etc/libmap.conf /etc/libmap32.conf /usr/local/etc/libmap.d/*; do
         [ -f "$f" ] || continue
         awk -v f="$f" '{ gsub(/\t/, " "); sub(/^ +/, "") } $0 != "" && $0 !~ /^#/ { print "CONF\t" f "\t" $0 }' "$f"
     done
     for f in /etc/httpd*.conf; do
         [ -f "$f" ] || continue
         awk -v f="$f" '{ gsub(/\t/, " "); sub(/^ +/, "") }
-            /^(# *php_(admin_)?(flag|value)|php_(admin_)?(flag|value)|Alias|AliasMatch|ScriptAlias|ScriptAliasMatch|<Files|<FilesMatch|<Directory|<Location|AddHandler|AddType|SetHandler|Action|LoadModule|Include|RewriteRule)/ { print "CONF\t" f "\t" $0 }' "$f"
+            /^(# *php_(admin_)?(flag|value)|php_(admin_)?(flag|value)|Listen|<VirtualHost|DocumentRoot|ServerRoot|User |Group |LoadFile|ProxyPass|ProxyPassMatch|Alias|AliasMatch|ScriptAlias|ScriptAliasMatch|<Files|<FilesMatch|<Directory|<Location|AddHandler|AddType|SetHandler|Action|LoadModule|Include|RewriteRule)/ { print "CONF\t" f "\t" $0 }' "$f"
     done
     [ -f /nsconfig/ns.conf ] || return 0
     awk '{ gsub(/\t/, " ") }
@@ -374,7 +398,7 @@ printf 'META\tTIME\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date)"
 printf 'META\tBOOT\t%s\n' "${BOOT:-unknown}"
 
 # STAGE records mark progress for the runner's -progress display.
-for stage in processes files suid sockets persistence conf scripts markers cores integrity logs; do
+for stage in processes files sweep suid sockets persistence conf scripts markers cores integrity logs; do
     printf 'STAGE\t%s\n' "$stage"
     "inventory_$stage"
 done

@@ -16,7 +16,7 @@ use_iocs=1
 show_progress=0
 
 # Collector settings forwarded in stream mode when set in this environment.
-STREAM_VARS=(SCAN_ROOTS EXCLUDE_RE SUID_ROOTS MARKER_ROOTS MARKER_RE CONFIG_MARKER_RE POSTBOOT_GRACE LOG_HUNT)
+STREAM_VARS=(SCAN_ROOTS EXCLUDE_RE SWEEP_ROOTS SUID_ROOTS MARKER_ROOTS MARKER_RE CONFIG_MARKER_RE POSTBOOT_GRACE LOG_HUNT)
 
 # Optional known-indicator layer (see iocs.conf); the generic checks below do
 # not depend on it.
@@ -32,6 +32,16 @@ INTERP_RE='^(sh|bash|csh|tcsh|ksh|zsh|dash|perl[0-9.]*|python[0-9.]*|php[0-9.]*|
 # httpd <Files>/<FilesMatch> blocks for dot-files other than the stock .ht*.
 HIDDEN_FILES_RE='^<Files[[:space:]]+"?\.([^h]|h[^t])'
 HIDDEN_FILESMATCH_RE='^<FilesMatch[[:space:]]+"?\^\\?\.([^h]|h[^t])'
+# Firmware-owned trees on the root memory disk: nothing there changes between
+# firmware upgrades, so any new or modified entry is significant.
+SYSTEM_DIR_RE='^/(bin|sbin|lib|libexec|rescue|usr|netscaler)/'
+# Where hidden regular files are reported without a baseline (temporary and
+# web-served trees have their own rules, /root holds ordinary dotfiles).
+HIDDEN_FILE_SCOPE_RE='^/(etc|var|lib|libexec|usr|bin|sbin|netscaler|flash|nsconfig)/'
+# Directories where shared libraries belong (any path component).
+LIBRARY_DIR_RE='/(lib|lib32|lib64|libexec|shlib)/'
+# Dynamic-linker hijacking in startup scripts and cron.
+PRELOAD_RE='LD_PRELOAD|LD_LIBRARY_PATH|LD_32_PRELOAD|libmap'
 SUSPICIOUS_CMD_RE='b64decode|base64 -d|openssl (enc|base64) .*-d|/dev/tcp/|nc -e|(curl|wget|fetch)[^|]*\|[[:space:]]*(sh|bash|perl|python[0-9.]*|php)([[:space:]]|$)'
 
 usage() {
@@ -242,8 +252,8 @@ collect() {
 
 # Collector stages in output order, with rough shares of collection time on
 # a 14.1 VPX (the file inventory dominates).
-PROGRESS_STAGES=(processes files suid sockets persistence conf scripts markers cores integrity logs)
-PROGRESS_WEIGHTS=(2 55 8 1 1 1 6 14 1 5 6)
+PROGRESS_STAGES=(processes files sweep suid sockets persistence conf scripts markers cores integrity logs)
+PROGRESS_WEIGHTS=(2 55 2 8 1 1 1 6 14 1 5 6)
 
 # Copy collector output to a file while drawing a status line on stderr:
 # stage, overall bar, file count (against the previous run's) and elapsed
@@ -311,8 +321,12 @@ split_inventory() {
     awk -F '\t' '$1=="CONF" {l=$3; for(i=4;i<=NF;i++) l=l "\t" $i; print $2 "|" l}' "$inventory" | LC_ALL=C sort -u > "$dir/conf"
     awk -F '\t' '$1=="MARKER" {print $2 "|" $3}' "$inventory" | LC_ALL=C sort -u > "$dir/markers"
     # sockstat: USER COMMAND PID FD PROTO LOCAL FOREIGN; keyed without pid/fd
-    # so worker processes and restarts do not count as drift.
-    awk -F '\t' '$1=="LISTENER" {n=split($2, w, " "); if (n >= 6) print w[1] "|" w[2] "|" w[5] "|" w[6]}' "$inventory" | LC_ALL=C sort -u > "$dir/listeners"
+    # so worker processes and restarts do not count as drift, plus the
+    # listening process's executable (first word of its ps command line) so
+    # a look-alike on the same address (e.g. a fake httpd) shows up.
+    awk -F '\t' '$1=="PROCESS" { split($5, c, " "); exe[$3]=c[1] }
+                 $1=="LISTENER" { n=split($2, w, " "); if (n >= 6) print w[1] "|" w[2] "|" w[5] "|" w[6] "|" ((w[3] in exe) ? exe[w[3]] : "?") }' \
+        "$inventory" | LC_ALL=C sort -u > "$dir/listeners"
 }
 
 compare_processes() {
@@ -362,14 +376,21 @@ compare_conf() {
 # Listening sockets (TCP listeners and bound UDP sockets). A new one is a
 # bind shell, tunnel or webshell side channel until shown otherwise.
 compare_listeners() {
-    local old=$1 cur=$2 line user cmd proto addr
+    local old=$1 cur=$2 user cmd proto addr exe
     section 'Listener drift'
+    # Baselines from before executables were recorded have four fields;
+    # compare on those only until the next baseline.
+    if [[ -s $old ]] && ! grep -q '^[^|]*|[^|]*|[^|]*|[^|]*|' "$old"; then
+        note 'Baseline predates executable paths for listeners; comparing without them. Re-run baseline to enable.'
+        cut -d'|' -f1-4 "$cur" | LC_ALL=C sort -u > "$cur.compat"
+        cur=$cur.compat
+    fi
     if cmp -s "$old" "$cur"; then ok 'No listener drift detected.'; return; fi
-    while IFS='|' read -r user cmd proto addr; do
-        report_finding HIGH "NEW LISTENER: $proto $addr process=$cmd user=$user"
+    while IFS='|' read -r user cmd proto addr exe; do
+        report_finding HIGH "NEW LISTENER: $proto $addr process=$cmd user=$user${exe:+ executable=$exe}"
     done < <(LC_ALL=C comm -13 "$old" "$cur")
-    while IFS='|' read -r user cmd proto addr; do
-        report_finding INFO "LISTENER GONE: $proto $addr process=$cmd user=$user"
+    while IFS='|' read -r user cmd proto addr exe; do
+        report_finding INFO "LISTENER GONE: $proto $addr process=$cmd user=$user${exe:+ executable=$exe}"
     done < <(LC_ALL=C comm -23 "$old" "$cur")
 }
 
@@ -414,13 +435,18 @@ compare_files() {
             if has_suid_bits "${nmodehash%%:*}"; then report_finding HIGH "NEW SETUID/SETGID $kind: $data"
             elif [[ $path =~ $WEBROOT_RE ]]; then report_finding HIGH "NEW $kind IN WEB ROOT: $data"
             elif [[ $path == */.* ]]; then report_finding HIGH "NEW HIDDEN $kind: $data"
+            elif [[ $path =~ $SYSTEM_DIR_RE ]]; then report_finding HIGH "NEW $kind IN SYSTEM DIRECTORY: $data"
             else
                 case "$path" in /tmp/*|/var/tmp/*) report_finding HIGH "NEW $kind IN TEMPORARY LOCATION: $data";; *) report_finding WARNING "NEW $kind: $data";; esac
             fi
             ;;
           REMOVED)
-            IFS='|' read -r _ otype _ <<< "$data"
-            report_finding INFO "REMOVED $(kind_of "$otype"): $data"
+            IFS='|' read -r path otype _ <<< "$data"
+            if [[ $path =~ $SYSTEM_DIR_RE ]]; then
+                report_finding WARNING "REMOVED $(kind_of "$otype") FROM SYSTEM DIRECTORY: $data"
+            else
+                report_finding INFO "REMOVED $(kind_of "$otype"): $data"
+            fi
             ;;
           CHANGED)
             IFS=$'\t' read -r before after <<< "$data"
@@ -439,6 +465,8 @@ compare_files() {
                 report_finding HIGH "MODIFIED SETUID/SETGID $kind: $path | old={$before} new={$after}"
             elif [[ $path =~ $WEBROOT_RE ]]; then
                 report_finding HIGH "MODIFIED $kind IN WEB ROOT: $path | old={$before} new={$after}"
+            elif [[ $path =~ $SYSTEM_DIR_RE ]]; then
+                report_finding HIGH "MODIFIED $kind IN SYSTEM DIRECTORY: $path | old={$before} new={$after}"
             else
                 report_finding WARNING "MODIFIED $kind: $path | old={$before} new={$after}"
             fi
@@ -527,6 +555,14 @@ hunt_files() {
                 continue
                 ;;
         esac
+        # Hidden regular files are rare outside temp trees; stock ones are in
+        # allowlist.default by exact path, so look-alike names still show.
+        if [[ $base == .* && $path =~ $HIDDEN_FILE_SCOPE_RE ]]; then
+            report_finding WARNING "HIDDEN FILE: $path size=$size mode=$mode modified=$(fmt_time "$mtime") hash=$hash"
+        fi
+        if [[ $base =~ \.so(\.[0-9]+)*$ && ! $path =~ $LIBRARY_DIR_RE && $path != /flash/* && $path != /nsconfig/* ]]; then
+            report_finding WARNING "SHARED LIBRARY OUTSIDE LIBRARY DIRECTORY: $path size=$size mode=$mode hash=$hash"
+        fi
         if [[ ${path%/*} == */.* ]] && (( exec )); then
             report_finding HIGH "EXECUTABLE FILE IN HIDDEN DIRECTORY: $path size=$size mode=$mode hash=$hash"
         elif [[ ${path%/*} == */.* ]]; then
@@ -637,8 +673,12 @@ hunt_conf() {
                 report_finding HIGH "HTTPD ALIAS TO SUSPICIOUS LOCATION: $file: $line"
             fi
             ;;
+          */libmap*.conf|*/libmap.d/*)
+            # FreeBSD's per-program library substitution; unused on stock NetScaler.
+            report_finding HIGH "LIBRARY MAPPING (libmap) ENTRY: $file: $line"
+            ;;
           */rc.netscaler|*/nsbefore.sh|*/nsafter.sh)
-            if [[ $line =~ python|perl[[:space:]]+-e|base64|b64decode|curl[[:space:]]|wget[[:space:]]|/var/tmp/|/tmp/|httpd\.conf|apachectl|chmod[[:space:]]+[0-7]*[2467][0-7]{3}|chmod[[:space:]]+[ugoa]*\+[rwx]*s ]]; then
+            if [[ $line =~ python|perl[[:space:]]+-e|base64|b64decode|curl[[:space:]]|wget[[:space:]]|/var/tmp/|/tmp/|httpd\.conf|apachectl|chmod[[:space:]]+[0-7]*[2467][0-7]{3}|chmod[[:space:]]+[ugoa]*\+[rwx]*s || $line =~ $PRELOAD_RE ]]; then
                 report_finding HIGH "SUSPICIOUS STARTUP COMMAND: $file: $line"
             fi
             ;;
@@ -646,7 +686,7 @@ hunt_conf() {
             cmd=$line
             # lockf's lock file argument routinely lives in /tmp.
             [[ $cmd =~ lockf([[:space:]]+-[a-z]+([[:space:]]+[0-9]+)?)*[[:space:]]+[^[:space:]]+ ]] && cmd=${cmd/"${BASH_REMATCH[0]}"/lockf}
-            if [[ $cmd =~ (/tmp/|/var/tmp/|/dev/shm/|/\.[^/[:space:]]) || $cmd =~ $SUSPICIOUS_CMD_RE ||
+            if [[ $cmd =~ (/tmp/|/var/tmp/|/dev/shm/|/\.[^/[:space:]]) || $cmd =~ $SUSPICIOUS_CMD_RE || $cmd =~ $PRELOAD_RE ||
                   $cmd =~ ^([^[:space:]]+[[:space:]]+){5}nobody[[:space:]] ||
                   ( $cmd =~ ([0-9]{1,3}\.){3}[0-9]{1,3} && ! $cmd =~ 127\.0\.0\.1 ) ||
                   ( $cmd =~ (curl|wget|fetch)[[:space:]] && ! $cmd =~ (curl|wget|fetch)[^|]*://(localhost|127\.0\.0\.1)([:/[:space:]]|$) ) ]]; then
@@ -673,6 +713,19 @@ hunt_confmarks() {
     while IFS=$'\t' read -r _ path match; do
         report_finding HIGH "TAMPERING STRING IN CONFIG/STARTUP FILE: $path: $match"
     done < <(awk -F '\t' '$1=="CONFMARK"' "$inventory")
+}
+
+# Hidden files and executables inside trees left out of the file inventory
+# (logs, runtime state, databases; collector sweep, not baselined).
+hunt_sweep() {
+    local path kind size mtime mode hash
+    while IFS=$'\t' read -r _ path kind size mtime mode hash; do
+        if [[ $kind == hidden ]]; then
+            report_finding WARNING "HIDDEN FILE IN EXCLUDED TREE: $path size=$size mode=$mode modified=$(fmt_time "$mtime") hash=$hash"
+        else
+            report_finding WARNING "EXECUTABLE IN EXCLUDED TREE: $path size=$size mode=$mode modified=$(fmt_time "$mtime") hash=$hash"
+        fi
+    done < <(awk -F '\t' '$1=="SWEEP"' "$inventory")
 }
 
 # Server-side scripts outside the vendor admin GUI (collector sweep).
@@ -767,6 +820,7 @@ hunt_current() {
     hunt_files
     hunt_integrity
     hunt_scripts
+    hunt_sweep
     hunt_confmarks
     hunt_cores
     hunt_pcaps

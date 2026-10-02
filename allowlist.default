@@ -41,3 +41,17 @@
 # Stock setgid files (also in NCSC-NL's known_guid_binaries list for
 # CVE-2025-6543 disk-image checks).
 ^\[HIGH\] SETUID/SETGID FILE IN UNEXPECTED LOCATION: /var/(run/nsprofmgmt\.pid|run/nsmap\.pid|configd_devno) mode=
+# Stock hidden files (reported by the HIDDEN FILE check), by exact path so a
+# look-alike name in the same directory is still reported.
+^\[WARNING\] HIDDEN FILE: /flash/nsconfig/\.(callhome\.conf|skf|nshostuuid|eula_run|nscfg_hostuuid|nscfg_hostuid|F1\.key|F2\.key|rpcs) size=
+^\[WARNING\] HIDDEN FILE: /flash/\.(version|nsva|testing) size=
+^\[WARNING\] HIDDEN FILE: /(netscaler|var/python|var/perl5)/\.signedexe\.manifest size=
+^\[WARNING\] HIDDEN FILE: /var/\.monit\.(id|state) size=
+^\[WARNING\] HIDDEN FILE: /var/nstmp/[^/ ]+/\.nscli_history size=
+^\[WARNING\] HIDDEN FILE: /var/nextgen/infra/\.ngapi\.version size=
+^\[WARNING\] HIDDEN FILE: /var/perl5/lib/perl5/[^ ]+/\.packlist size=
+^\[WARNING\] HIDDEN FILE: /netscaler/websocketd/vendor/[^ ]+/\.(gitignore|travis\.yml) size=
+# Stock setgid PID files (see above) also carry an execute bit.
+^\[WARNING\] EXECUTABLE IN EXCLUDED TREE: /var/run/(nsprofmgmt|nsmap)\.pid size=
+# Vendor library shipped outside a lib directory.
+^\[WARNING\] SHARED LIBRARY OUTSIDE LIBRARY DIRECTORY: /var/nextgen/infra/packages/libngapi\.so size=
