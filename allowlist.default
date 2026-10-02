@@ -55,3 +55,13 @@
 ^\[WARNING\] EXECUTABLE IN EXCLUDED TREE: /var/run/(nsprofmgmt|nsmap)\.pid size=
 # Vendor library shipped outside a lib directory.
 ^\[WARNING\] SHARED LIBRARY OUTSIDE LIBRARY DIRECTORY: /var/nextgen/infra/packages/libngapi\.so size=
+# Stock runtime markers and PID file in /var/run, and a template shipped in
+# the Python library tree (reported by the excluded-tree sweep).
+^\[WARNING\] HIDDEN FILE IN EXCLUDED TREE: /var/run/\.(NETSCALER|NSCONFIG|NSVERSION|NSKERNEL) size=
+^\[WARNING\] EXECUTABLE IN EXCLUDED TREE: /var/run/nscrlrefresh\.pid size=
+^\[WARNING\] HIDDEN FILE IN EXCLUDED TREE: /var/python/lib/python[0-9.]+/site-packages/ns_pycov/\.coveragerc\.template size=
+# Unpack cache of the PAR-packed vendor program /netscaler/nsgslbautosync
+# (GSLB auto-sync), identical on separate 14.1 appliances. The directory name
+# is a hash of the packed program, so another build produces a new name that
+# is reported again; drift in the directory is still reported by check.
+^\[HIGH\] EXECUTABLE FILE IN TEMPORARY LOCATION: /var/tmp/par-726f6f74/cache-d815da7e2e34f02bcb2d36af4b261eac187fe84c/[^ ]+ size=

@@ -40,6 +40,14 @@ SYSTEM_DIR_RE='^/(bin|sbin|lib|libexec|rescue|usr|netscaler)/'
 HIDDEN_FILE_SCOPE_RE='^/(etc|var|lib|libexec|usr|bin|sbin|netscaler|flash|nsconfig)/'
 # Directories where shared libraries belong (any path component).
 LIBRARY_DIR_RE='/(lib|lib32|lib64|libexec|shlib)/'
+# Configuration areas and vendor code/agent trees, where world-writable
+# entries are HIGH (together with web roots and system directories).
+CONFIG_AREA_RE='^/(etc|flash|nsconfig|var/cron|var/pubkey)(/|$)'
+CODE_TREE_RE='^/var/(python|perl5|mastools|pgsql)(/|$)'
+# The ADM agent upgrades itself in place; its files are summarised when its
+# version changes. At most this many changed paths are listed for review.
+ADM_AGENT_DIR=/var/mastools
+ADM_AGENT_LIST_MAX=10
 # Dynamic-linker hijacking in startup scripts and cron.
 PRELOAD_RE='LD_PRELOAD|LD_LIBRARY_PATH|LD_32_PRELOAD|libmap'
 SUSPICIOUS_CMD_RE='b64decode|base64 -d|openssl (enc|base64) .*-d|/dev/tcp/|nc -e|(curl|wget|fetch)[^|]*\|[[:space:]]*(sh|bash|perl|python[0-9.]*|php)([[:space:]]|$)'
@@ -189,6 +197,9 @@ load_iocs() {
         IOC_IP_RE="(^|[^0-9.])($IOC_IP_RE)([^0-9]|\$)"
     fi
 }
+
+# True when an octal mode string grants write permission to others.
+is_world_writable() { [[ $1 =~ ^[0-7]+$ ]] && (( 8#$1 & 2 )); }
 
 # True when an octal mode string carries the setuid or setgid bit.
 has_suid_bits() { [[ $1 =~ ^[0-7]+$ ]] && (( (8#$1 >> 9) & 6 )); }
@@ -421,13 +432,37 @@ compare_files() {
     local old=$1 cur=$2 event data path base before after kind
     local otype ouid ogid omodehash ntype nuid ngid nmodehash
     local f0=$findings s0=$suppressed
+    local agent_updated=0 agent_old agent_new agent_changed=0 agent_added=0 agent_removed=0 agent_list=''
     section 'Filesystem drift'
+    # An ADM agent self-upgrade rewrites ~100 files under its directory. When
+    # its version file changed, those changes are summarised in one finding
+    # (other checks, e.g. world-writable or hidden files, still apply).
+    if [[ $(grep -m1 "^$ADM_AGENT_DIR/version.txt|" "$old") != "$(grep -m1 "^$ADM_AGENT_DIR/version.txt|" "$cur")" ]] &&
+       grep -q "^$ADM_AGENT_DIR/version.txt|" "$cur"; then
+        agent_updated=1
+        agent_old=$(awk -F '\t' '$1=="META" && $2=="ADM_AGENT" {print $3; exit}' "$hostdir/inventory.baseline" 2>/dev/null)
+        agent_new=$(awk -F '\t' '$1=="META" && $2=="ADM_AGENT" {print $3; exit}' "$tmpdir/inventory")
+    fi
     awk -F'|' '
       FNR==NR {old[$1]=$0; next}
       {new[$1]=$0; if (!($1 in old)) print "ADDED|" $0; else if ($0!=old[$1]) print "CHANGED|" old[$1] "\t" $0}
       END {for (p in old) if (!(p in new)) print "REMOVED|" old[p]}
     ' "$old" "$cur" > "${cur}.diff"
     while IFS='|' read -r event data; do
+        if (( agent_updated )) && [[ ${data%%|*} == "$ADM_AGENT_DIR"/* ]]; then
+            case "$event" in
+                ADDED) agent_added=$((agent_added + 1)); agent_list+="  NEW ${data%%|*}"$'\n' ;;
+                REMOVED) agent_removed=$((agent_removed + 1)); agent_list+="  REMOVED ${data%%|*}"$'\n' ;;
+                CHANGED)
+                    # Directories whose only change is size/mtime are not drift.
+                    IFS=$'\t' read -r before after <<< "$data"
+                    IFS='|' read -r _ otype _ _ ouid ogid omodehash <<< "$before"
+                    IFS='|' read -r _ ntype _ _ nuid ngid nmodehash <<< "$after"
+                    [[ $otype == Directory && $ntype == Directory && $ouid == "$nuid" && $ogid == "$ngid" && $omodehash == "$nmodehash" ]] && continue
+                    agent_changed=$((agent_changed + 1)); agent_list+="  MODIFIED ${data%%|*}"$'\n' ;;
+            esac
+            continue
+        fi
         case "$event" in
           ADDED)
             IFS='|' read -r path ntype _ _ _ _ nmodehash <<< "$data"
@@ -463,6 +498,8 @@ compare_files() {
                 report_finding HIGH "SETUID/SETGID BIT ADDED: $path | old={$before} new={$after}"
             elif has_suid_bits "${nmodehash%%:*}"; then
                 report_finding HIGH "MODIFIED SETUID/SETGID $kind: $path | old={$before} new={$after}"
+            elif is_world_writable "${nmodehash%%:*}" && ! is_world_writable "${omodehash%%:*}" && [[ $ntype != 'Symbolic Link' ]]; then
+                report_finding HIGH "MADE WORLD-WRITABLE: $path | old={$before} new={$after}"
             elif [[ $path =~ $WEBROOT_RE ]]; then
                 report_finding HIGH "MODIFIED $kind IN WEB ROOT: $path | old={$before} new={$after}"
             elif [[ $path =~ $SYSTEM_DIR_RE ]]; then
@@ -473,6 +510,12 @@ compare_files() {
             ;;
         esac
     done < "${cur}.diff"
+    if (( agent_changed + agent_added + agent_removed > 0 )); then
+        report_finding WARNING "ADM AGENT UPDATED: ${agent_old:-unknown} -> ${agent_new:-unknown} ($agent_changed modified, $agent_added added, $agent_removed removed under $ADM_AGENT_DIR)"
+        review_block "$(printf '%s' "$agent_list" | head -n "$ADM_AGENT_LIST_MAX")"
+        (( agent_changed + agent_added + agent_removed > ADM_AGENT_LIST_MAX )) &&
+            review "... and $((agent_changed + agent_added + agent_removed - ADM_AGENT_LIST_MAX)) more; compare inventory.baseline and inventory.latest for the full list"
+    fi
     if (( findings == f0 )); then
         if (( suppressed > s0 )); then note "No filesystem drift beyond $((suppressed - s0)) allowlisted change(s)."
         else ok 'No filesystem drift detected.'; fi
@@ -715,6 +758,50 @@ hunt_confmarks() {
     done < <(awk -F '\t' '$1=="CONFMARK"' "$inventory")
 }
 
+# World-writable files and directories (symlinks, sockets and pipes aside).
+# Temporary trees are world-writable by design; there only a missing sticky
+# bit on the tree itself is reported. A world-writable directory is reported
+# once, with the number of world-writable entries below it. HIGH in web roots,
+# system directories, configuration areas and vendor code/agent trees.
+hunt_world_writable() {
+    local path type mode kind area level p n
+    local -A ww=() wwtype=() below=()
+    while IFS='|' read -r path type mode; do
+        case "$type" in 'Symbolic Link'|Socket|'Fifo File') continue ;; esac
+        is_world_writable "$mode" || continue
+        case "$path" in
+            /tmp|/var/tmp)
+                (( 8#$mode & 8#1000 )) ||
+                    report_finding WARNING "WORLD-WRITABLE TEMPORARY DIRECTORY WITHOUT STICKY BIT: $path mode=$mode"
+                continue ;;
+            /tmp/*|/var/tmp/*) continue ;;
+        esac
+        ww[$path]=$mode; wwtype[$path]=$type
+    done < <(awk -F '\t' '$1=="FILE" {print $2 "|" $3 "|" substr($8, 1, index($8, ":") - 1)}' "$inventory")
+    (( ${#ww[@]} )) || return 0
+    # Fold entries into their topmost world-writable ancestor directory
+    # (wwtype is never pruned, so the walk sees every world-writable entry).
+    for path in "${!ww[@]}"; do
+        p=${path%/*}; n=''
+        while [[ -n $p && ${wwtype[$p]:-} == Directory ]]; do n=$p; p=${p%/*}; done
+        [[ -n $n ]] && below[$n]=$(( ${below[$n]:-0} + 1 ))
+        [[ -n $n ]] && unset "ww[$path]"
+    done
+    while IFS= read -r path; do
+        [[ -n $path ]] || continue
+        mode=${ww[$path]}; kind=$(kind_of "${wwtype[$path]}"); level=HIGH
+        if [[ $path =~ $WEBROOT_RE ]]; then area=' IN WEB ROOT'
+        elif [[ $path =~ $SYSTEM_DIR_RE ]]; then area=' IN SYSTEM DIRECTORY'
+        elif [[ $path =~ $CONFIG_AREA_RE ]]; then area=' IN CONFIGURATION AREA'
+        elif [[ $path =~ $CODE_TREE_RE ]]; then area=' IN VENDOR CODE TREE'
+        else area=''; level=WARNING
+        fi
+        n=${below[$path]:-}
+        local what=entries; [[ $n == 1 ]] && what=entry
+        report_finding "$level" "WORLD-WRITABLE $kind$area: $path mode=$mode${n:+ ($n world-writable $what below)}"
+    done < <(printf '%s\n' "${!ww[@]}" | LC_ALL=C sort)
+}
+
 # Hidden files and executables inside trees left out of the file inventory
 # (logs, runtime state, databases; collector sweep, not baselined).
 hunt_sweep() {
@@ -821,6 +908,7 @@ hunt_current() {
     hunt_integrity
     hunt_scripts
     hunt_sweep
+    hunt_world_writable
     hunt_confmarks
     hunt_cores
     hunt_pcaps

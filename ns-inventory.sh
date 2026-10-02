@@ -21,11 +21,11 @@ export PATH
 # its contents are inventoried under /flash. /var is scanned minus large or
 # fast-changing trees; /var/python/bin is kept, its library tree is not.
 SCAN_ROOTS=${SCAN_ROOTS:-"/nsconfig /flash /bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin /lib /usr/lib /usr/local/lib /etc /root /netscaler /var /tmp"}
-EXCLUDE_RE=${EXCLUDE_RE:-'^/var/(log|nslog|core|nstrace|run|cache|db|pgsql|nsproflog|nssynclog|crash|python/(lib|include)|mastools/logs)(/|$)'}
+EXCLUDE_RE=${EXCLUDE_RE:-'^/var/(log|nslog|core|nstrace|run|cache|db|nsproflog|nssynclog|crash|python/(lib|include)|mastools/logs)(/|$)'}
 # Trees left out of the file inventory above (keep in step with EXCLUDE_RE)
 # are swept by name only for hidden files and executables; the Python
 # library tree only for hidden files, as its modules are executable.
-SWEEP_ROOTS=${SWEEP_ROOTS:-"/var/log /var/nslog /var/core /var/nstrace /var/run /var/cache /var/db /var/pgsql /var/nsproflog /var/nssynclog /var/crash /var/mastools/logs"}
+SWEEP_ROOTS=${SWEEP_ROOTS:-"/var/log /var/nslog /var/core /var/nstrace /var/run /var/cache /var/db /var/nsproflog /var/nssynclog /var/crash /var/mastools/logs"}
 SWEEP_HIDDEN_ONLY_ROOTS=${SWEEP_HIDDEN_ONLY_ROOTS:-"/var/python/lib /var/python/include"}
 MAX_HASH_SIZE=${MAX_HASH_SIZE:-104857600}
 SUID_ROOTS=${SUID_ROOTS:-/}
@@ -396,6 +396,9 @@ fi
 printf 'META\tHOST\t%s\n' "$(hostname 2>/dev/null || echo unknown)"
 printf 'META\tTIME\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date)"
 printf 'META\tBOOT\t%s\n' "${BOOT:-unknown}"
+# Version of the ADM agent (mastools), which upgrades itself; lets the runner
+# summarise an agent upgrade instead of listing every changed file.
+printf 'META\tADM_AGENT\t%s\n' "$(head -n 1 /var/mastools/version.txt 2>/dev/null)"
 
 # STAGE records mark progress for the runner's -progress display.
 for stage in processes files sweep suid sockets persistence conf scripts markers cores integrity logs; do
