@@ -304,10 +304,12 @@ inventory_scripts() {
         grep -v '^/var/netscaler/gui/admin_ui/' | file_meta SCRIPT
 }
 
-# Packet-engine core dumps: crashes accompany memory-corruption exploitation
-# attempts (e.g. CVE-2025-6543). CORE path size mtime.
+# Packet-engine core dumps and kernel crash dumps: crashes accompany
+# memory-corruption exploitation attempts (e.g. CVE-2025-6543). savecore's
+# bookkeeping files (bounds, minfree) are skipped. CORE path size mtime.
 inventory_cores() {
-    find /var/core -iname 'NSPPE*' -type f 2>/dev/null | perl -ne '
+    { find /var/core -iname 'NSPPE*' -type f 2>/dev/null
+      find /var/crash -type f ! -name bounds ! -name minfree 2>/dev/null; } | perl -ne '
         chomp; my @s = stat $_ or next; print join("\t", "CORE", $_, $s[7], $s[9]), "\n"'
 }
 

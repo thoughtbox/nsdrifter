@@ -93,7 +93,7 @@ Exit status is `0` for no findings, `1` when findings were reported, and `2` for
 
 ## Local state and options
 
-Host-specific state is stored in `~/.local/state/netscaler-hunt/<host>/` (directory mode 700, files 600): the baselines (`processes`, `files`, `suid`, `conf`, `markers`, `listeners`, raw `inventory`), `inventory.latest`, an optional per-host `allowlist`, and in stream mode `run-tag`.
+Host-specific state is stored in `~/.local/state/netscaler-hunt/<host>/` (directory mode 700, files 600): the baselines (`processes`, `files`, `suid`, `conf`, `markers`, `listeners`, `cores`, raw `inventory`), `inventory.latest`, an optional per-host `allowlist`, and in stream mode `run-tag`.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -129,6 +129,7 @@ Collector settings (runner environment in stream mode, environment on the ADC in
 - Listening sockets (TCP listeners and bound UDP sockets), keyed on user, process name, protocol, local address and the listening process's executable path, so worker processes and restarts don't count but a look-alike on the same address (e.g. another `httpd` on `127.0.0.1:81`) does. A new listener is HIGH (bind shell, tunnel, ad-hoc server); one that disappears is INFO. Established connections change constantly and are only listed for review.
 - Configuration lines: cron tables, `rc.netscaler`, `nsbefore.sh`/`nsafter.sh`, `rc.conf`, SSH authorized keys (`/nsconfig/ssh`, `/root/.ssh`, `/var/pubkey/<user>/.ssh`), httpd directives (`php_flag` including commented-out ones, `Listen`, `<VirtualHost>`, `DocumentRoot`/`ServerRoot`, `User`/`Group`, `LoadFile`, proxying, `Alias*`, `<Files*>`, handlers, rewrites), FreeBSD `libmap` files (`/etc/libmap.conf`, `/etc/libmap32.conf`, `/usr/local/etc/libmap.d/*`) and `ns.conf` system users, groups, command policies and management access (password hashes redacted). Added lines are HIGH.
 - Webshell content markers (HIGH outside, WARNING inside vendor trees).
+- Packet-engine core dumps in `/var/core` and kernel crash dumps in `/var/crash` (savecore's `bounds` and `minfree` aside), keyed on path and mtime so a dump overwriting an older one counts. A new dump is HIGH (crashes accompany memory-corruption exploitation); one that disappears is INFO. All current dumps are still listed under the generic checks.
 
 ### Generic current-state checks (`check` and `hunt`)
 
@@ -149,7 +150,7 @@ These encode techniques from public reporting on NetScaler exploitation since CV
   Each file with a marker is also checked for base64 *string literals* passed to a decoder (PHP `base64_decode`, Python `b64decode`, Perl `decode_base64`), the way webshells hide a payload, as opposed to ordinary code decoding variables. The report shows `embedded base64: <NONE DETECTED>` or the number of literals, the longest one's length and the start of its decoded content. Vendor files (admin GUI, Perl library, ADM agent) are listed for review because they legitimately use these functions; one that decodes a literal is reported as a WARNING (none do on a stock 14.1 VPX from what I can tell, but I don't have much experience with much variety).
 - Suspicious cron entries (temp or hidden paths, decode-and-execute, external downloads, IP addresses, jobs as `nobody`) and startup commands in `rc.netscaler`/`nsbefore.sh`/`nsafter.sh`.
 - Processes running from temporary or hidden paths (or interpreters running scripts there), and decode-and-execute or reverse-shell command lines.
-- Packet capture files (pcap/pcapng) outside the trace directory, and packet-engine core dumps.
+- Packet capture files (pcap/pcapng) outside the trace directory, packet-engine core dumps, and kernel crash dumps in `/var/crash`.
 - Log evidence in current and rotated logs: log poisoning through packet-engine watchdog messages (`ns.log`, `messages`), packet-engine crashes, DTLS exploitation attempts, command injection, base64 PHP payloads and script requests in `httpaccess*`/`httperror*`, suspicious interactive shell commands in `bash.log`, and suspicious CLI `shell` commands and system-user changes in the `ns.log` CLI audit.
 - All listeners and sockets are listed for review.
 
@@ -165,7 +166,7 @@ Findings whose full text (`[LEVEL] message`) matches an extended regular express
 
 ## Baseline handling
 
-Create the first baseline from a known-good appliance state, after normal maintenance and configuration changes are complete. Keep a copy of the whole local state directory in a restricted, backed-up location. Do not run `baseline` casually: it replaces the trusted baseline for each named host. Baselines made by older versions lack some components (`suid`, `conf`, `markers`, `listeners`, listener executables); `check` skips or narrows those comparisons until `baseline` is re-run. Changing `SCAN_ROOTS` or upgrading the tool also warrants a new baseline. During an investigation, preserve the current baseline and raw inventory before taking further action.
+Create the first baseline from a known-good appliance state, after normal maintenance and configuration changes are complete. Keep a copy of the whole local state directory in a restricted, backed-up location. Do not run `baseline` casually: it replaces the trusted baseline for each named host. Baselines made by older versions lack some components (`suid`, `conf`, `markers`, `listeners`, `cores`, listener executables); `check` skips or narrows those comparisons until `baseline` is re-run. Changing `SCAN_ROOTS` or upgrading the tool also warrants a new baseline. During an investigation, preserve the current baseline and raw inventory before taking further action.
 
 This is a triage and drift-detection aid, not a proof of compromise or a substitute for forensic acquisition. NetScaler releases and appliance configuration differ; expected processes, generated files, and socket listeners vary. Review findings in context and use vendor-supported response and evidence collection procedures.
 

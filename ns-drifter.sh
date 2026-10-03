@@ -338,6 +338,7 @@ split_inventory() {
     awk -F '\t' '$1=="PROCESS" { split($5, c, " "); exe[$3]=c[1] }
                  $1=="LISTENER" { n=split($2, w, " "); if (n >= 6) print w[1] "|" w[2] "|" w[5] "|" w[6] "|" ((w[3] in exe) ? exe[w[3]] : "?") }' \
         "$inventory" | LC_ALL=C sort -u > "$dir/listeners"
+    awk -F '\t' '$1=="CORE" {print $2 "|" $4 "|" $3}' "$inventory" | LC_ALL=C sort -u > "$dir/cores"
 }
 
 compare_processes() {
@@ -402,6 +403,28 @@ compare_listeners() {
     done < <(LC_ALL=C comm -13 "$old" "$cur")
     while IFS='|' read -r user cmd proto addr exe; do
         report_finding INFO "LISTENER GONE: $proto $addr process=$cmd user=$user${exe:+ executable=$exe}"
+    done < <(LC_ALL=C comm -23 "$old" "$cur")
+}
+
+# Finding label for a CORE inventory path.
+core_kind() {
+    case "$1" in
+        /var/crash/*) printf 'KERNEL CRASH DUMP' ;;
+        *) printf 'PACKET ENGINE CORE DUMP' ;;
+    esac
+}
+
+# Packet-engine core dumps and kernel crash dumps keyed on path and mtime, so
+# a dump that overwrites an older one at the same path counts as new.
+compare_cores() {
+    local old=$1 cur=$2 path mtime size
+    section 'Core dump drift'
+    if cmp -s "$old" "$cur"; then ok 'No new core dumps since baseline.'; return; fi
+    while IFS='|' read -r path mtime size; do
+        report_finding HIGH "NEW $(core_kind "$path") since baseline (possible exploitation crash): $path size=$size time=$(fmt_time "$mtime")"
+    done < <(LC_ALL=C comm -13 "$old" "$cur")
+    while IFS='|' read -r path mtime size; do
+        report_finding INFO "$(core_kind "$path") GONE: $path size=$size time=$(fmt_time "$mtime")"
     done < <(LC_ALL=C comm -23 "$old" "$cur")
 }
 
@@ -826,7 +849,7 @@ hunt_scripts() {
 hunt_cores() {
     local path size mtime
     while IFS=$'\t' read -r _ path size mtime; do
-        report_finding WARNING "PACKET ENGINE CORE DUMP (possible exploitation crash): $path size=$size time=$(fmt_time "$mtime")"
+        report_finding WARNING "$(core_kind "$path") (possible exploitation crash): $path size=$size time=$(fmt_time "$mtime")"
     done < <(awk -F '\t' '$1=="CORE"' "$inventory")
 }
 
@@ -946,7 +969,7 @@ for host in "$@"; do
     split_inventory "$tmpdir/inventory" "$tmpdir"
     case "$ACTION" in
       baseline)
-        for part in processes files suid conf markers listeners; do cp "$tmpdir/$part" "$hostdir/$part.baseline"; done
+        for part in processes files suid conf markers listeners cores; do cp "$tmpdir/$part" "$hostdir/$part.baseline"; done
         cp "$tmpdir/inventory" "$hostdir/inventory.baseline"
         chmod 600 "$hostdir"/*.baseline
         ok "Baseline saved locally: $hostdir (protect and back up this directory)."
@@ -961,6 +984,7 @@ for host in "$@"; do
         compare_optional compare_conf 'Configuration drift' conf
         compare_optional compare_markers 'Webshell/implant marker drift' markers
         compare_optional compare_listeners 'Listener drift' listeners
+        compare_optional compare_cores 'Core dump drift' cores
         hunt_current "$tmpdir/inventory"
         cp "$tmpdir/inventory" "$hostdir/inventory.latest" && chmod 600 "$hostdir/inventory.latest"
         ;;
